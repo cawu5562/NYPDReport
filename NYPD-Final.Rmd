@@ -1,0 +1,163 @@
+---
+title: "NYPD Project"
+author: "C. Wu"
+date: "2024-04-29"
+output:
+  html_document: default
+  pdf_document: default
+---
+# NYPD Historical Shooting Data and Prediction Analysis
+In my analysis, I examine NYPD shooting data in depth to examine the feasibility of predicting future shootings. The key question guiding my work is whether shooting rates can be predicted from historical data. Through the use of data analytics techniques and predictive models, I want to find any patterns and trends that can be informed by predictive models. The goal is not only to determine whether such predictions are possible, but also to understand the extent to which these predictions can be reliable. Through this study, I hope to provide insights that can support prevention and policy development.
+
+
+```{r setup, include=FALSE}
+#install these packages. I had to look up how to format this correctly so my RMD file would knit correctly
+knitr::opts_chunk$set(echo = TRUE)
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+required_packages <- c("tidyverse", "lubridate", "plotly", "ggplot2", "caret", "forecast")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(ggplot2)
+library(caret)
+library(forecast)
+```
+
+
+``` {r get data}
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+df <- read.csv(url_in)
+
+```
+#### Next we will be cleaning our data
+I will be removing some data that I deem unecessary to answer my question which are the different location data not including Boroughs
+
+```{r Clean data}
+#Removing some columns I deem unnecessary
+df <- subset(df, select = -c(Latitude, Longitude, Lon_Lat, LOC_CLASSFCTN_DESC, LOCATION_DESC, X_COORD_CD, Y_COORD_CD, LOC_OF_OCCUR_DESC))
+
+#I don't think I can really use the latitude longitude and the location info besides Boro so I will remove them all.
+
+#Turning blank values into NULL/NA
+
+for (i in 1:ncol(df)) {
+  df[[i]][df[[i]] == "" | df[[i]] %in% c("NULL", "null", "(null)", "UNKNOWN")] <- "Unknown"
+}
+
+#Lets convert the OCCUR_DATE column into a real date format so we can graph later and add a year column
+
+df$OCCUR_DATE <- as.Date(df$OCCUR_DATE, format = "%m/%d/%Y")
+df <- df %>%
+  mutate(Year = year(OCCUR_DATE),
+         Month = month(OCCUR_DATE),
+         DayOfWeek = wday(OCCUR_DATE, label = TRUE),
+         IsWeekend = ifelse(wday(OCCUR_DATE) %in% c(1, 7), 1, 0))
+
+
+df <- df[order(df$OCCUR_DATE), ]
+
+```
+#### Here I want to visualize and understand the data that was cleaned. 
+I want to also more importantly visualize the yearly shootings
+```{r Visualize data}
+
+#Lets see how many shootings occured per Borough
+df_unique <- df[!duplicated(df$INCIDENT_KEY), ]
+
+shooting_counts_per_boro <- table(df_unique$BORO)
+
+barplot(shooting_counts_per_boro, main = "Number of Shootings per Boro", xlab = "Borough", ylab = "Number of Shootings", col = "blue")
+
+
+#Lets see the perpetrator age group counts
+shooting_counts_per_perp_age <- table(df_unique$PERP_AGE_GROUP)
+
+barplot(shooting_counts_per_perp_age, main = "Number of Shootings per Perp Age", xlab="Age Group of Perp", ylab = "Number of Shootings", col = "Red")
+
+
+#Lets take a look at the perp race
+shooting_counts_per_perp_race <- table(df_unique$PERP_RACE)
+plot_ly(x = names(shooting_counts_per_perp_race), y = shooting_counts_per_perp_race, type = 'bar', 
+        name = 'Shootings per Race') %>%
+  layout(title = "Number of Shootings per Perp Race",
+         xaxis = list(title = "Race"),
+         yaxis = list(title = "Number of Shootings"))
+
+
+#lets take a look at the perp sex
+shooting_counts_per_perp_sex <- table(df_unique$PERP_SEX)
+barplot(shooting_counts_per_perp_sex, main = "Number of Shootings per Perp Sex", xlab="Sex Group of Perp", ylab = "Number of Shootings", col = "Blue")
+
+
+#Lets take a look at how many shooting incidents occurred over time by year since there is too much data to group by day
+
+df_unique %>%
+  mutate(OCCUR_DATE = as.Date(OCCUR_DATE, format = "%m/%d/%Y"),
+         Year = format(OCCUR_DATE, "%Y")) %>%
+  group_by(Year) %>%
+  summarise(Shootings = n()) %>%
+  ggplot(aes(x = Year, y = Shootings, group = 1)) +  
+    geom_line() +  
+    geom_point() +  
+    labs(title = "Number of Shootings per Year", x = "Year", y = "Number of Shootings") +
+    theme_minimal()
+```
+
+
+
+#### Now we can Analyze the data
+I want to see if I can create a monthly prediction model to predict future shootings
+I will split the data into training and testing and the model will be fitted on the testing data which is 80% of the original data
+Then to test the predictions I will use the testing data which is 20% of the original data
+
+```{r analyse data}
+
+#Lets try to predict how many shootings will occur first
+#We will take a look at the trends per year and month
+#We need to first aggregate shootings per month and year
+
+monthly_shootings <- df_unique %>%
+  mutate(Month_Year = paste(year(OCCUR_DATE), month(OCCUR_DATE), sep = "-")) %>%
+  group_by(Month_Year) %>%
+  summarise(Shootings = n())
+
+monthly_shootings$Month_Year <- as.Date(paste0(monthly_shootings$Month_Year, "-01"))
+
+#Lets split our data into testing and training data sets so we can try to predict
+
+split <- floor(0.8 * nrow(monthly_shootings))
+
+training_set <- monthly_shootings[1:split, ]
+testing_set <- monthly_shootings[(split + 1): nrow(monthly_shootings), ]
+
+#Now we create and fit our model
+model <- lm(Shootings ~ Month_Year, data = training_set)
+
+predictions <- predict(model, newdata = testing_set)
+
+
+#We can then graph our predictions on the testing data set
+testing_set$Predictions <- predictions
+
+ggplot() +
+  geom_line(data = training_set, aes(x = Month_Year, y = Shootings), color = "blue") +
+  geom_line(data = testing_set, aes(x = Month_Year, y = Shootings), color = "blue", linetype = "dashed") +
+  geom_line(data = testing_set, aes(x = Month_Year, y = Predictions), color = "red") +
+  labs(title = "Predicted vs. Actual Shootings", x = "Month and Year", y = "Number of Shootings") +
+  theme_minimal()
+
+#Lets calculate the RMSE 
+rmse <- sqrt(mean((testing_set$Shootings - predictions)^2))
+print(paste("RMSE:", rmse))
+
+```
+#### Results of the model
+We can see that the model almost accurately predicts the trend of the shootings however cannot predict precicely the future shootings that occur. We can see from some of the testing that the RMSE is around 69.68 meaning that the standard deviation of our prediction errors to about 70 shootings. 
+I believe that possibly with more accurate data it is definitely possible to predict the number of shootings that will occur in a year which could help law enforcement prepare for these tragic events better. 
+I tried not to do any modeling based on predictions of sex/race as there could be bias.
+Most of my modeling is based on just the number of shootings and date time. 
+
+
